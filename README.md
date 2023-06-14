@@ -1,2 +1,2 @@
 # web server
- http || https server
+ http/https server on linux
