@@ -161,6 +161,14 @@ char* content_type(char* file) {
 
 	if (!strcmp(extension, "html") || !strcmp(extension, "htm"))
 		return "text/html";
+	else if(!strcmp(extension,"jpg") || !strcmp(extension,"jpeg"))
+		return "image/jpeg";
+	else if(!strcmp(extension,"png"))
+		return "image/png";
+	else if(!strcmp(extension,"js"))
+		return "text/javascript";
+	else if(!strcmp(extension,"css"))
+		return "text/css";	
 	else
 		return "text/plain";
 }
