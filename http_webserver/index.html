@@ -7,7 +7,11 @@
     <title>HTML 홈페이지 만들기</title>
 </head>
 
-<body>
+<body> 
+    <audio autoplay controls>
+    <source src="supe.mp3" type="audio/mp3">
+
+    
     <a href="index.html">
         <h1>HTML 홈페이지 만들기</h1>
     </a>
@@ -23,7 +27,17 @@
     <h3>HTML의 탄생</h3>
     <p>HTML은 <strong>Hyper Text Markup Language</strong>라는 용어의 약자로서 물리학자 <strong>팀 버너스리</strong>가 1990년에 HTTP, URL,
         브라우저와 함께 개발했습니다. 팀 버너스리는 인터넷의 기반을 닦은 여러 공로로 웹의 아버지라고 불리는 인물 중 하나입니다.</p>
+<img src="earth.gif" alt="" data-animated="./chaeng-animated.gif" data-stati    c="./chaeng-static.gif" class="hov-anim">
+  <script>
+  $(".hov-anim").mouseover(function() {
+    $(this).attr("src", $(this).data("animated"))
+  }),
+  $(".hov-anim").mouseout(function() {
+    $(this).attr("src", $(this).data("static"))
+  });
+  </script>
 
+        
 </body>
 
 </html>
