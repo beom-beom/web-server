@@ -1,46 +1,50 @@
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 #include <unistd.h>
-#include <errno.h>
-#include <arpa/inet.h>
-#include <sys/socket.h>
+#include <fcntl.h>
+#include <signal.h>
 #include <sys/types.h>
-#include <netinet/in.h>
+#include <sys/stat.h>
+#include <sys/socket.h>
+#include <arpa/inet.h>
+#include <pthread.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 
+#define BUF_SIZE 1024
+#define HEADER_FMT "HTTP/1.1 %d %s\nContent-Length: %ld\nContent-Type: %s\n\n"
+#define NOT_FOUND_CONTENT       "<h1>404 Not Found</h1>\n"
+#define SERVER_ERROR_CONTENT    "<h1>500 Internal Server Error</h1>\n"
+
 #define CERT_FILE "pert.pem"
 #define KEY_FILE "key.pem"
-#define MAX 1024
 SSL_CTX *ctx;
-void * serverThread(void *arg);
+void fill_header(char *header, int status, long len, char *type);
+void error_handling(char *message);
+void handle_404(SSL *ssl);
+void handle_500(SSL *ssl);
+void *client_handler(void *arg);
+void accept_connection(struct sockaddr_in clnt_addr,int clnt_sock,socklen_t clnt_addr_size);
+void bind_and_listen(int serv_sock, int backlog, int port);
 void setupServerCtx();
-void bind_and_listen(int serv_sock, struct sockaddr_in* serv_adr, int backlog, int port);
-void accept_connection(int serv_sock, struct sockaddr_in clnt_addr);
-void* handle_client_request(SSL* ssl);
-void send_data_ssl(SSL* ssl, char* ct, char* file_name);
-char* content_type(char* file);
-void send_error(SSL* ssl);
-void error_handling(char* message);
+int main(int argc, char *argv[]) {
+    int port;
+   int serv_sock;
+   struct sockaddr_in clnt_addr;
+   socklen_t clnt_addr_size;
 
-int main(int argc,char *argv[]) {
-	int serv_sock;
-	struct sockaddr_in serv_addr, clnt_addr;
-	SSL *ssl;
-
-	setupServerCtx();
-
-	//socket
-	serv_sock = socket(PF_INET, SOCK_STREAM, 0);
-	bind_and_listen(serv_sock, &serv_addr, 20, atoi(argv[1]));
-
-	while (1) {
-		accept_connection(serv_sock, clnt_addr);
-	}
-	SSL_CTX_free(ctx);
+   if(argc!=2){
+           printf("Usage : %s <port>\n", argv[0]);
+           return 0;
+      }
+   setupServerCtx();
+   serv_sock = socket(AF_INET, SOCK_STREAM, 0);
+   bind_and_listen(serv_sock, 20, atoi(argv[1]));
+   accept_connection(clnt_addr,serv_sock,clnt_addr_size);
+   return 0;
 }
-void setupServerCtx(){
-    	//SSL library memset-> 0
+void setupServerCtx(){ //ctx,privatekey file,certificate file setting
 	SSL_library_init();
 	const SSL_METHOD *method;
 	method = TLS_server_method();
@@ -50,143 +54,152 @@ void setupServerCtx(){
 	if(SSL_CTX_use_PrivateKey_file(ctx, KEY_FILE, SSL_FILETYPE_PEM)	!= 1)
 		error_handling("private err");
 }
-void bind_and_listen(int serv_sock, struct sockaddr_in* serv_adr, int backlog, int port){
-	memset(serv_adr, 0, sizeof(struct sockaddr_in));
-	serv_adr->sin_family = AF_INET;
-	serv_adr->sin_addr.s_addr = htonl(INADDR_ANY);
-	serv_adr->sin_port = htons(port);
+void bind_and_listen(int serv_sock, int backlog, int port){ //socket bind and listen
+	 struct sockaddr_in sin;
 
-	if(	(bind(serv_sock, (struct sockaddr*)serv_adr, sizeof(struct sockaddr_in))) == -1)
-		error_handling("bind err");
-	if(	(listen(serv_sock, backlog)) == -1)
-		error_handling("listen err");
+    sin.sin_family = AF_INET;
+    sin.sin_addr.s_addr = htonl(INADDR_ANY);
+    sin.sin_port = htons(port);
+ 	if(bind(serv_sock, (struct sockaddr *)&sin, sizeof(sin)) == -1)
+    		error_handling("bind() error");
+    	if(listen(serv_sock, backlog) == -1)
+    		error_handling("listen() error");
 }
-void accept_connection(int serv_sock, struct sockaddr_in clnt_addr){
-	SSL *ssl;
-	int clnt_sock;
-	pthread_t tid;
-	socklen_t clnt_addr_size;
-	clnt_addr_size = sizeof(clnt_addr);
-	clnt_sock = accept(serv_sock, (struct sockaddr*)&clnt_addr, (socklen_t*)&clnt_addr_size);
+void accept_connection(struct sockaddr_in clnt_addr,int clnt_sock,socklen_t clnt_addr_size){ //socket accept,create thread and created thread works client_handler
 
-	ssl = SSL_new(ctx);
-	SSL_set_fd(ssl,clnt_sock);
-	pthread_create (&tid, NULL, serverThread, ssl);
-	pthread_detach(tid);
+	 while (1) {
+        int *serv_sock = malloc(sizeof(int));
+        *serv_sock = accept(clnt_sock, (struct sockaddr *)&clnt_addr, &clnt_addr_size);
+        if (*serv_sock < 0) {
+            perror("[ERR] failed to accept.\n");
+            free(serv_sock);
+            continue;
+        }
+         SSL *ssl = SSL_new(ctx);
+      	SSL_set_fd(ssl,*serv_sock);
+        pthread_t tid;
+        if (pthread_create(&tid, NULL, client_handler, (void *)ssl) != 0) {
+            perror("[ERR] failed to create thread.\n");
+            free(serv_sock);
+            SSL_free(ssl);
+            
+        }
+    }
+    close(clnt_sock);
 }
-void * serverThread(void *arg){
-	SSL *ssl = (SSL *) arg;
+
+void fill_header(char *header, int status, long len, char *type) { //header에 정보 입력
+    char status_text[40];
+     switch (status) {
+        case 200:
+            strcpy(status_text, "OK");
+            break;
+        case 404:
+            strcpy(status_text, "Not Found");
+            break;
+        case 500:
+        default:
+            strcpy(status_text, "Internal Server Error");
+            break;
+    }
+    sprintf(header, HEADER_FMT, status, status_text, len, type);
+}
+
+void content_type(char *ct_type, char *uri) { //읽고자하는 파일의 컨텐츠 타입 확인
+    char *ext = strrchr(uri, '.');
+    if (!strcmp(ext, ".html"))
+        strcpy(ct_type, "text/html");
+    else if (!strcmp(ext, ".jpg") || !strcmp(ext, ".jpeg"))
+        strcpy(ct_type, "image/jpeg");
+    else if (!strcmp(ext, ".png"))
+        strcpy(ct_type, "image/png");
+    else if (!strcmp(ext, ".css"))
+        strcpy(ct_type, "text/css");
+    else if (!strcmp(ext, ".js"))
+        strcpy(ct_type, "text/javascript");
+    else if(!strcmp(ext, ".mp3"))
+         strcpy(ct_type,"audio/mp3");
+    else
+        strcpy(ct_type, "text/plain");
+}
+
+void handle_404(SSL *ssl) { // 헤더 상태가 404일때
+    char header[BUF_SIZE];
+    fill_header(header, 404, sizeof(NOT_FOUND_CONTENT), "text/html");
+
+    SSL_write(ssl, header, strlen(header));
+    SSL_write(ssl, NOT_FOUND_CONTENT, sizeof(NOT_FOUND_CONTENT));
+}
+
+void handle_500(SSL *ssl) { // 헤더 상태가 500일때
+    char header[BUF_SIZE];
+    fill_header(header, 500, sizeof(SERVER_ERROR_CONTENT), "text/html");
+
+    SSL_write(ssl, header, strlen(header));
+    SSL_write(ssl, SERVER_ERROR_CONTENT, sizeof(SERVER_ERROR_CONTENT));
+}
+
+void *client_handler(void *arg) { //client로부터 요청이 들어오면
+  
+    char header[BUF_SIZE];
+    char buf[BUF_SIZE];
+   SSL *ssl = (SSL *) arg;
 
 	if (SSL_accept(ssl) <= 0){
-		error_handling("hand-shake err");
 		SSL_free(ssl);
 		return 0;
 	}
-	fprintf(stderr, "SSL Connection opened\n");
-	handle_client_request(ssl);
-	fprintf(stderr, "SSL Connection closed\n");
-}
-void* handle_client_request(SSL *ssl) {
-	char req_line[MAX];
-	char method[MAX];
-	char ct[MAX];
-	char file_name[MAX];
-	char buf[MAX];
+   
+   fprintf(stderr, "SSL Connection open\n");
+    if (SSL_read(ssl, buf, BUF_SIZE) < 0) {
+        perror("[ERR] Failed to read request.\n");
+        handle_500(ssl);
+        SSL_shutdown(ssl);
+        fprintf(stderr, "SSL Connection closed\n");
+    }
 
-	SSL_read(ssl, req_line, MAX);	
-    /*HTTP 헤더가 아닌경우 종료*/
-	if (strstr(req_line, "HTTP/")== NULL) {
-		send_error(ssl);
-		SSL_shutdown(ssl);
-		SSL_free(ssl);
-		return 0;
-	}
-	strcpy(method, strtok(req_line, " /"));
+    char *method = strtok(buf, " ");
+    char *uri = strtok(NULL, " ");
+    if (method == NULL || uri == NULL) {
+        perror("[ERR] Failed to identify method, URI.\n");
+        handle_500(ssl);
+        SSL_shutdown(ssl); 
+        fprintf(stderr, "SSL Connection closed\n");
+      }
+    char safe_uri[BUF_SIZE];
+    char *local_uri;
+    struct stat st;
 
-    /*GET 메소드가 아닌경우 종료*/
-	if (strcmp(method, "GET") != 0) {
-		send_error(ssl);
-		SSL_shutdown(ssl);
-		SSL_free(ssl);
-		return 0;
-	}
+    strcpy(safe_uri, uri);
+    local_uri = safe_uri + 1;
+     if (stat(local_uri, &st) < 0) {
+        handle_404(ssl);
+        SSL_shutdown(ssl); 
+        fprintf(stderr, "SSL Connection closed\n");
+    }  
+    int fd = open(local_uri, O_RDONLY);
+    if (fd < 0) {
+         handle_500(ssl);
+        SSL_shutdown(ssl);
+        fprintf(stderr, "SSL Connection closed\n"); 
+       }
 
-    /*파일 전송*/
-	strcpy(file_name, strtok(NULL, " /"));
-	strcpy(ct, content_type(file_name));
-	send_data_ssl(ssl, ct, file_name); //입력받은 데이터에 해당하는 파일을 전송함
+    int ct_len = st.st_size;
+    char ct_type[40];
+    content_type(ct_type, local_uri);
+    fill_header(header, 200, ct_len, ct_type);
+    SSL_write(ssl, header, strlen(header));
 
-}
+    int cnt;
+    while ((cnt = read(fd, buf, BUF_SIZE)) > 0)
+        SSL_write(ssl, buf, cnt);
 
-/*http 헤더를 받고 지정된 파일을 전송한다.*/
-void send_data_ssl(SSL* ssl, char* ct, char* file_name) {
-	char protocol[] = "HTTP/1.0 200 OK\r\n";
-	char server[] = "Server:Linux Web Server\r\n";
-	char cnt_len[] = "Content-lenght:2048\r\n";
-	char cnt_type[MAX];
-	char buf[MAX];
-	FILE* send_file;
-
-	sprintf(cnt_type, "Content-type :%s\r\n\r\n", ct);
-	send_file = fopen(file_name, "r");
-	if (send_file == NULL) {
-		send_error(ssl);
-		SSL_shutdown(ssl);
-		SSL_free(ssl);
-		return;
-	}
-
-	SSL_write(ssl, protocol, strlen(protocol));
-	SSL_write(ssl, server, strlen(server));
-	SSL_write(ssl, cnt_len, strlen(cnt_len));
-	SSL_write(ssl, cnt_type, strlen(cnt_type));
-
-	while (fgets(buf, MAX, send_file) != NULL) {
-		SSL_write(ssl, buf, strlen(buf));
-	}
-
-	fclose(send_file);
-	SSL_shutdown(ssl);
-	SSL_free(ssl);
+   fprintf(stderr, "SSL Connection closed\n");
+   SSL_shutdown(ssl);
 }
 
-/*헤더를 읽어와서 헤더의 파일요청 방식이 html이면 html 반환하고 아니면 text 반환*/
-char* content_type(char* file) {
-	char extension[MAX];
-	char file_name[MAX];
-
-	strcpy(file_name, file);
-	strtok(file_name, ".");
-	strcpy(extension, strtok(NULL, "."));
-
-	if (!strcmp(extension, "html") || !strcmp(extension, "htm"))
-		return "text/html";
-	else if(!strcmp(extension,"jpg") || !strcmp(extension,"jpeg"))
-		return "image/jpeg";
-	else if(!strcmp(extension,"png"))
-		return "image/png";
-	else if(!strcmp(extension,"js"))
-		return "text/javascript";
-	else if(!strcmp(extension,"css"))
-		return "text/css";	
-	else
-		return "text/plain";
-}
-void send_error(SSL* ssl) {
-	char protocol[] = "HTTP/1.0 400 Bad Request\r\n";
-	char server[] = "Server:Linux Web Server\r\n";
-	char cnt_len[] = "Content-length:2048\r\n";
-	char cnt_type[] = "Content-type:text/html\r\n\r\n";
-	char content[] = "<html><head><title>NETWORK</title><head>""<body><font size+=10><br>오류 발생 요청 파일명 및 요청 방식 확인""</font></body></html>";
-
-	SSL_write(ssl, protocol, strlen(protocol));
-	SSL_write(ssl, server, strlen(server));
-	SSL_write(ssl, cnt_len, strlen(cnt_len));
-	SSL_write(ssl, cnt_type, strlen(cnt_type));
-	SSL_write(ssl, content, strlen(content));
-}
-void error_handling(char* message) {
-	fputs(message, stderr);
+void error_handling(char *message){
+	fputs(message,stderr);
 	fputc('\n', stderr);
 	return;
 }
