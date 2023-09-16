@@ -101,6 +101,8 @@ void content_type(char *ct_type, char *uri) {
         strcpy(ct_type, "text/css");
     else if (!strcmp(ext, ".js"))
         strcpy(ct_type, "text/javascript");
+    else if(!strcmp(ext, ".mp3"))
+         strcpy(ct_type,"audio/mp3");    
     else
         strcpy(ct_type, "text/plain");
 }
@@ -175,7 +177,7 @@ void *client_handler(void *arg) {
     int cnt;
     while ((cnt = read(fd, buf, BUF_SIZE)) > 0)
         write(client_sock, buf, cnt);
-        
+
     fprintf(stderr, "Connection closed\n");
     close(client_sock);
     pthread_exit(NULL);
