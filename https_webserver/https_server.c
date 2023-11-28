@@ -84,6 +84,7 @@ void accept_connection(struct sockaddr_in clnt_addr,int clnt_sock,socklen_t clnt
             SSL_free(ssl);
             
         }
+	 pthread_detach(tid);
     }
     close(clnt_sock);
 }
@@ -196,6 +197,8 @@ void *client_handler(void *arg) { //client로부터 요청이 들어오면
 
    fprintf(stderr, "SSL Connection closed\n");
    SSL_shutdown(ssl);
+   free(arg); 
+   pthread_exit(NULL);
 }
 
 void error_handling(char *message){
